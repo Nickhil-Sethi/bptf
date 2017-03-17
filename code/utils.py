@@ -1,10 +1,12 @@
-import numpy as np
-import numpy.random as rn
-import sktensor as skt
-
-import pickle
 from path import path
 from time import sleep
+
+import pickle
+import numpy as np
+import numpy.random as rn
+
+import sktensor as skt
+
 
 
 def make_first_mode(X, m):

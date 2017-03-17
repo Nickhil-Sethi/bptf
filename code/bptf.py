@@ -4,93 +4,94 @@ Bayesian Poisson tensor factorization with variational inference.
 import sys
 import time
 import numpy as np
+import sktensor as skt
 import numpy.random as rn
 import scipy.special as sp
-import sktensor as skt
+
 from sklearn.base import BaseEstimator, TransformerMixin
+
+from utils import *
 
 from path import path
 from argparse import ArgumentParser
-from utils import *
 
 
 class BPTF(BaseEstimator, TransformerMixin):
     def __init__(self, n_modes=4, n_components=100,  max_iter=200, tol=0.0001,
                  smoothness=100, verbose=True, alpha=0.1, debug=False):
-        self.n_modes = n_modes
-        self.n_components = n_components
-        self.max_iter = max_iter
-        self.tol = tol
-        self.smoothness = smoothness
-        self.verbose = verbose
-        self.debug = debug
+        self.n_modes        = n_modes
+        self.n_components   = n_components
+        self.max_iter       = max_iter
+        self.tol            = tol
+        self.smoothness     = smoothness
+        self.verbose        = verbose
+        self.debug          = debug
 
-        self.alpha = alpha                                      # shape hyperparameter
-        self.beta_M = np.ones(self.n_modes, dtype=float)        # rate hyperparameter (inferred)
+        self.alpha          = alpha                                     # shape hyperparameter
+        self.beta_M         = np.ones(self.n_modes, dtype=float)        # rate hyperparameter (inferred)
 
-        self.gamma_DK_M = np.empty(self.n_modes, dtype=object)  # variational shapes
-        self.delta_DK_M = np.empty(self.n_modes, dtype=object)  # variational rates
+        self.gamma_DK_M     = np.empty(self.n_modes, dtype=object)      # variational shapes
+        self.delta_DK_M     = np.empty(self.n_modes, dtype=object)      # variational rates
 
-        self.E_DK_M = np.empty(self.n_modes, dtype=object)      # arithmetic expectations
-        self.G_DK_M = np.empty(self.n_modes, dtype=object)      # geometric expectations
+        self.E_DK_M         = np.empty(self.n_modes, dtype=object)      # arithmetic expectations
+        self.G_DK_M         = np.empty(self.n_modes, dtype=object)      # geometric expectations
 
         # Inference cache
-        self.sumE_MK = np.empty((self.n_modes, self.n_components), dtype=float)
-        self.zeta = None
-        self.nz_recon_I = None
+        self.sumE_MK        = np.empty((self.n_modes, self.n_components), dtype=float)
+        self.zeta           = None
+        self.nz_recon_I     = None
 
     def _reconstruct_nz(self, subs_I_M):
         """Computes the reconstruction for only non-zero entries."""
-        I = subs_I_M[0].size
-        K = self.n_components
-        nz_recon_IK = np.ones((I, K))
+        I                   = subs_I_M[0].size
+        K                   = self.n_components
+        nz_recon_IK         = np.ones((I, K))
         for m in xrange(self.n_modes):
-            nz_recon_IK *= self.G_DK_M[m][subs_I_M[m], :]
-        self.nz_recon_I = nz_recon_IK.sum(axis=1)
+            nz_recon_IK     *= self.G_DK_M[m][subs_I_M[m], :]
+        self.nz_recon_I     = nz_recon_IK.sum(axis=1)
         return self.nz_recon_I
 
     def _elbo(self, data, mask=None):
         """Computes the Evidence Lower Bound (ELBO)."""
         if mask is None:
-            uttkrp_K = self.sumE_MK.prod(axis=0)
+            uttkrp_K        = self.sumE_MK.prod(axis=0)
         elif isinstance(mask, skt.dtensor):
-            uttkrp_DK = mask.uttkrp(self.E_DK_M, 0)
-            uttkrp_K = (self.E_DK_M[0] * uttkrp_DK).sum(axis=0)
+            uttkrp_DK       = mask.uttkrp(self.E_DK_M, 0)
+            uttkrp_K        = (self.E_DK_M[0] * uttkrp_DK).sum(axis=0)
         elif isinstance(mask, skt.sptensor):
-            uttkrp_DK = sp_uttkrp(mask.vals, mask.subs, 0, self.G_DK_M)
-            uttkrp_K = (self.E_DK_M[0] * uttkrp_DK).sum(axis=0)
+            uttkrp_DK       = sp_uttkrp(mask.vals, mask.subs, 0, self.G_DK_M)
+            uttkrp_K        = (self.E_DK_M[0] * uttkrp_DK).sum(axis=0)
 
-        bound = uttkrp_K.sum()
+        bound               = uttkrp_K.sum()
 
         if isinstance(data, skt.dtensor):
-            subs_I_M = data.nonzero()
-            vals_I = data[subs_I_M]
+            subs_I_M        = data.nonzero()
+            vals_I          = data[subs_I_M]
         elif isinstance(data, skt.sptensor):
-            subs_I_M = data.subs
-            vals_I = data.vals
-        nz_recon_I = self._reconstruct_nz(subs_I_M)
+            subs_I_M        = data.subs
+            vals_I          = data.vals
+        nz_recon_I          = self._reconstruct_nz(subs_I_M)
 
-        bound -= np.log(vals_I + 1).sum()
-        bound += (vals_I * np.log(nz_recon_I)).sum()
+        bound               -= np.log(vals_I + 1).sum()
+        bound               += (vals_I * np.log(nz_recon_I)).sum()
 
-        K = self.n_components
+        K                   = self.n_components
         for m in xrange(self.n_modes):
-            D = self.mode_dims[m]
-            shp = self.alpha
-            rte = self.alpha * self.beta_M[m]
-            gamma_DK = self.gamma_DK_M[m]
-            delta_DK = self.delta_DK_M[m]
+            D               = self.mode_dims[m]
+            shp             = self.alpha
+            rte             = self.alpha * self.beta_M[m]
+            gamma_DK        = self.gamma_DK_M[m]
+            delta_DK        = self.delta_DK_M[m]
 
-            bound += (shp - 1.) * (np.log(self.G_DK_M[m]).sum())
-            bound -= rte * (self.sumE_MK[m, :].sum())
-            bound -= K * D * (sp.gammaln(shp) - shp * np.log(rte))
-            bound += (-(gamma_DK - 1.) * sp.psi(gamma_DK) - np.log(delta_DK)
-                      + gamma_DK + sp.gammaln(gamma_DK)).sum()
+            bound           += (shp - 1.) * (np.log(self.G_DK_M[m]).sum())
+            bound           -= rte * (self.sumE_MK[m, :].sum())
+            bound           -= K * D * (sp.gammaln(shp) - shp * np.log(rte))
+            bound           += (-(gamma_DK - 1.) * sp.psi(gamma_DK) - np.log(delta_DK) + gamma_DK + sp.gammaln(gamma_DK)).sum()
         return bound
 
     def _init_all_components(self, mode_dims):
         assert len(mode_dims) == self.n_modes
-        self.mode_dims = mode_dims
+        self.mode_dims      = mode_dims
         for m, D in enumerate(mode_dims):
             self._init_component(m, D)
 
@@ -98,9 +99,9 @@ class BPTF(BaseEstimator, TransformerMixin):
         assert self.mode_dims[m] == dim
         K = self.n_components
         if not self.debug:
-            s = self.smoothness
-            gamma_DK = s * rn.gamma(s, 1. / s, size=(dim, K))
-            delta_DK = s * rn.gamma(s, 1. / s, size=(dim, K))
+            s               = self.smoothness
+            gamma_DK        = s * rn.gamma(s, 1. / s, size=(dim, K))
+            delta_DK        = s * rn.gamma(s, 1. / s, size=(dim, K))
         else:
             gamma_DK = np.ones((dim, K))
             delta_DK = np.ones((dim, K))
